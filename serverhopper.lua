@@ -1,4 +1,4 @@
--- serverhopper.lua (CORE patched)
+-- serverhopper.lua (FULL PATCHED, PERSISTENT RETRY)
 -- Host this file as a PUBLIC raw file (Pastebin raw, public GitHub raw, Hastebin)
 -- Do NOT include a ?token=... in the URL when using the loader.
 
@@ -127,7 +127,6 @@ end
 local function tryTeleportToServer(placeId, serverId)
     if teleporting or teleportCooldown then return end
     teleporting = true
-    enabled = false
     pcall(function()
         TeleportSvc:TeleportToPlaceInstance(tonumber(placeId), serverId, LocalPlayer)
     end)
@@ -137,30 +136,25 @@ end
 pcall(function()
     if TeleportSvc and TeleportSvc.TeleportInitFailed then
         TeleportSvc.TeleportInitFailed:Connect(function()
-            if teleportCooldown then return end
             teleporting = false
             teleportCooldown = true
             task.delay(TELEPORT_FAIL_COOLDOWN, function()
                 teleportCooldown = false
-                enabled = true
             end)
         end)
     end
 end)
 
--- Persistent server hop loop
+-- Persistent server hop loop (retry forever)
 local function serverHopLoop()
     local placeId = tostring(game.PlaceId)
     local myJobId = tostring(game.JobId)
     local baseUrl = "https://games.roblox.com/v1/games/" .. placeId .. "/servers/Public?sortOrder=Asc&limit=" .. tostring(SERVER_PAGE_LIMIT)
 
     while enabled do
-        if teleporting or teleportCooldown then break end
         local cursor = nil
 
         repeat
-            if not enabled or teleporting or teleportCooldown then return end
-
             local url = baseUrl
             if cursor and #cursor > 0 then
                 url = url .. "&cursor=" .. HttpService:UrlEncode(cursor)
@@ -170,7 +164,7 @@ local function serverHopLoop()
             if not ok or not body then
                 attemptCount = attemptCount + 1
                 attemptsLabel.Text = "Attempts: " .. tostring(attemptCount)
-                wait(0.3)
+                wait(POLL_DELAY)
                 break
             end
 
@@ -178,28 +172,30 @@ local function serverHopLoop()
             if not ok2 or type(data) ~= "table" or type(data.data) ~= "table" then
                 attemptCount = attemptCount + 1
                 attemptsLabel.Text = "Attempts: " .. tostring(attemptCount)
-                wait(0.25)
+                wait(POLL_DELAY)
                 break
             end
 
             for _, server in ipairs(data.data) do
-                if not enabled or teleporting or teleportCooldown then return end
                 local serverId = tostring(server.id or server.playbackCloudId or server.idValue or "")
                 if serverId ~= "" and serverId ~= myJobId then
                     attemptCount = attemptCount + 1
                     attemptsLabel.Text = "Attempts: " .. tostring(attemptCount)
-                    tryTeleportToServer(placeId, serverId)
-                    wait(0.12)
+
+                    -- Attempt teleport if allowed
+                    if not teleporting and not teleportCooldown then
+                        tryTeleportToServer(placeId, serverId)
+                    end
+
+                    wait(0.1)
                 end
             end
 
             cursor = data.nextPageCursor
             wait(0.05)
-        until not cursor or not enabled
+        until not cursor
 
-        if enabled and not teleporting and not teleportCooldown then
-            wait(POLL_DELAY)
-        end
+        wait(POLL_DELAY)
     end
 end
 
@@ -218,13 +214,7 @@ local function startCountdownAndHop()
     end
 
     countdownLabel.Text = "HOPPING..."
-    local ok, err = pcall(serverHopLoop)
-    if not ok then
-        countdownLabel.Text = "ERROR"
-        warn("Server hop loop error:", err)
-        wait(1)
-        if enabled then countdownLabel.Text = "READY" else countdownLabel.Text = "OFF" end
-    end
+    spawn(serverHopLoop)
 end
 
 -- Toggle handler
