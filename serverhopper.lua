@@ -1,11 +1,17 @@
--- serverhopper.lua (FULL PATCHED, PERSISTENT RETRY)
--- Host this file as a PUBLIC raw file (Pastebin raw, public GitHub raw, Hastebin)
+-- serverhopper.lua (FULL PATCHED, LOADING-SAFE)
+-- Host this as a PUBLIC raw file (Pastebin raw, public GitHub raw, Hastebin)
 -- Do NOT include a ?token=... in the URL when using the loader.
 
 if getgenv().SERVER_HOPPER_RUNNING then
     return
 end
 getgenv().SERVER_HOPPER_RUNNING = true
+
+-- Wait for the game to fully load
+if not game:IsLoaded() then
+    game.Loaded:Wait()
+end
+task.wait(1) -- extra safety
 
 -- == Config ==
 local COUNTDOWN_TIME = 15
@@ -19,12 +25,15 @@ local TeleportSvc = game:GetService("TeleportService")
 local HttpService = game:GetService("HttpService")
 local LocalPlayer = Players.LocalPlayer
 
+-- Wait for PlayerGui to exist
+local playerGui = LocalPlayer:WaitForChild("PlayerGui")
+
 -- UI creation (compact modern)
 local screenGui = Instance.new("ScreenGui")
 screenGui.Name = "PersistentServerHopperCore"
 screenGui.ResetOnSpawn = false
 screenGui.IgnoreGuiInset = true
-screenGui.Parent = LocalPlayer:WaitForChild("PlayerGui")
+screenGui.Parent = playerGui
 
 local holder = Instance.new("Frame", screenGui)
 holder.Name = "Holder"
@@ -182,7 +191,6 @@ local function serverHopLoop()
                     attemptCount = attemptCount + 1
                     attemptsLabel.Text = "Attempts: " .. tostring(attemptCount)
 
-                    -- Attempt teleport if allowed
                     if not teleporting and not teleportCooldown then
                         tryTeleportToServer(placeId, serverId)
                     end
@@ -201,6 +209,7 @@ end
 
 -- Countdown routine
 local function startCountdownAndHop()
+    task.wait(0.5) -- extra safety
     local remaining = COUNTDOWN_TIME
     countdownLabel.Text = tostring(math.ceil(remaining)) .. "s"
     while remaining > 0 do
