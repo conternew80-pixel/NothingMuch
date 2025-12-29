@@ -1,5 +1,5 @@
--- serverhopper.lua (CORE)
--- Host this file as a PUBLIC raw file (pastebin.com/raw/... or raw.githubusercontent.com/...)
+-- serverhopper.lua (CORE patched)
+-- Host this file as a PUBLIC raw file (Pastebin raw, public GitHub raw, Hastebin)
 -- Do NOT include a ?token=... in the URL when using the loader.
 
 if getgenv().SERVER_HOPPER_RUNNING then
@@ -11,6 +11,7 @@ getgenv().SERVER_HOPPER_RUNNING = true
 local COUNTDOWN_TIME = 15
 local POLL_DELAY = 0.8
 local SERVER_PAGE_LIMIT = 100
+local TELEPORT_FAIL_COOLDOWN = 3 -- seconds
 
 -- Services
 local Players     = game:GetService("Players")
@@ -79,9 +80,10 @@ toggleBtn.Parent = holder
 -- State
 local enabled = true       -- auto-enabled on execute
 local attemptCount = 0
-local teleporting = false  -- set true when we attempt a teleport so other loops stop
+local teleporting = false
+local teleportCooldown = false
 
--- Xeno/executor-friendly HTTP GET (tries many common functions)
+-- Xeno/executor-friendly HTTP GET
 local function normalizeResponse(resp)
     if not resp then return nil end
     if type(resp) == "string" then return resp end
@@ -121,41 +123,43 @@ local function httpGet(url)
     error("No HTTP request method available in this execution environment.")
 end
 
--- Attempt teleport safely (sets teleporting flag so other loops stop)
+-- Attempt teleport safely
 local function tryTeleportToServer(placeId, serverId)
-    if teleporting then return end
+    if teleporting or teleportCooldown then return end
     teleporting = true
     enabled = false
-    -- Attempt teleport; wrap in pcall so the script doesn't error out
     pcall(function()
         TeleportSvc:TeleportToPlaceInstance(tonumber(placeId), serverId, LocalPlayer)
     end)
-    -- If teleport succeeds the client will leave and script stops.
-    -- If teleport fails, TeleportInitFailed should fire (see below) and reset teleporting.
 end
 
--- If teleport fails to initialize, reset so we can keep trying
+-- Handle teleport failure
 pcall(function()
     if TeleportSvc and TeleportSvc.TeleportInitFailed then
         TeleportSvc.TeleportInitFailed:Connect(function()
+            if teleportCooldown then return end
             teleporting = false
-            enabled = true
+            teleportCooldown = true
+            task.delay(TELEPORT_FAIL_COOLDOWN, function()
+                teleportCooldown = false
+                enabled = true
+            end)
         end)
     end
 end)
 
--- Core persistent server hop loop: scan pages, attempt teleport to any serverId != current JobId
+-- Persistent server hop loop
 local function serverHopLoop()
     local placeId = tostring(game.PlaceId)
     local myJobId = tostring(game.JobId)
     local baseUrl = "https://games.roblox.com/v1/games/" .. placeId .. "/servers/Public?sortOrder=Asc&limit=" .. tostring(SERVER_PAGE_LIMIT)
 
     while enabled do
-        if teleporting then break end
+        if teleporting or teleportCooldown then break end
         local cursor = nil
 
         repeat
-            if not enabled or teleporting then return end
+            if not enabled or teleporting or teleportCooldown then return end
 
             local url = baseUrl
             if cursor and #cursor > 0 then
@@ -179,16 +183,12 @@ local function serverHopLoop()
             end
 
             for _, server in ipairs(data.data) do
-                if not enabled or teleporting then return end
+                if not enabled or teleporting or teleportCooldown then return end
                 local serverId = tostring(server.id or server.playbackCloudId or server.idValue or "")
                 if serverId ~= "" and serverId ~= myJobId then
                     attemptCount = attemptCount + 1
                     attemptsLabel.Text = "Attempts: " .. tostring(attemptCount)
-
-                    -- Try teleport (will set teleporting and stop other loops)
                     tryTeleportToServer(placeId, serverId)
-
-                    -- tiny delay to avoid hammering too fast
                     wait(0.12)
                 end
             end
@@ -197,13 +197,13 @@ local function serverHopLoop()
             wait(0.05)
         until not cursor or not enabled
 
-        if enabled and not teleporting then
+        if enabled and not teleporting and not teleportCooldown then
             wait(POLL_DELAY)
         end
     end
 end
 
--- Countdown routine (cancellable)
+-- Countdown routine
 local function startCountdownAndHop()
     local remaining = COUNTDOWN_TIME
     countdownLabel.Text = tostring(math.ceil(remaining)) .. "s"
@@ -227,7 +227,7 @@ local function startCountdownAndHop()
     end
 end
 
--- Toggle handler (still useful if you want to manually stop)
+-- Toggle handler
 toggleBtn.MouseButton1Click:Connect(function()
     enabled = not enabled
     if enabled then
@@ -243,7 +243,7 @@ toggleBtn.MouseButton1Click:Connect(function()
     end
 end)
 
--- initial state: auto-start
+-- Auto-start
 countdownLabel.Text = tostring(COUNTDOWN_TIME) .. "s"
 attemptsLabel.Text = "Attempts: 0"
 spawn(startCountdownAndHop)
