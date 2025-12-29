@@ -1,20 +1,26 @@
--- Xeno-friendly Persistent Server Hopper
--- Auto-ON on execute, 15s countdown, persistent retry (tries many HTTP APIs commonly exposed by executors)
--- Paste into Xeno executor (Local client script)
+-- serverhopper.lua (CORE)
+-- Host this file as a PUBLIC raw file (pastebin.com/raw/... or raw.githubusercontent.com/...)
+-- Do NOT include a ?token=... in the URL when using the loader.
 
+if getgenv().SERVER_HOPPER_RUNNING then
+    return
+end
+getgenv().SERVER_HOPPER_RUNNING = true
+
+-- == Config ==
+local COUNTDOWN_TIME = 15
+local POLL_DELAY = 0.8
+local SERVER_PAGE_LIMIT = 100
+
+-- Services
 local Players     = game:GetService("Players")
 local TeleportSvc = game:GetService("TeleportService")
 local HttpService = game:GetService("HttpService")
 local LocalPlayer = Players.LocalPlayer
 
--- CONFIG
-local COUNTDOWN_TIME    = 15      -- seconds
-local POLL_DELAY         = 0.8    -- wait between full scans/retries
-local SERVER_PAGE_LIMIT  = 100
-
--- UI (compact modern)
+-- UI creation (compact modern)
 local screenGui = Instance.new("ScreenGui")
-screenGui.Name = "XenoServerHopper"
+screenGui.Name = "PersistentServerHopperCore"
 screenGui.ResetOnSpawn = false
 screenGui.IgnoreGuiInset = true
 screenGui.Parent = LocalPlayer:WaitForChild("PlayerGui")
@@ -36,7 +42,7 @@ title.Font = Enum.Font.GothamSemibold
 title.TextSize = 15
 title.TextColor3 = Color3.fromRGB(230,230,230)
 title.TextXAlignment = Enum.TextXAlignment.Left
-title.Text = "Server Hopper (Xeno)"
+title.Text = "Server Hopper"
 
 local countdownLabel = Instance.new("TextLabel", holder)
 countdownLabel.Size = UDim2.new(1, -20, 0, 36)
@@ -71,48 +77,36 @@ local btnCorner = Instance.new("UICorner", toggleBtn); btnCorner.CornerRadius = 
 toggleBtn.Parent = holder
 
 -- State
-local enabled = true          -- auto-enabled on execute
+local enabled = true       -- auto-enabled on execute
 local attemptCount = 0
+local teleporting = false  -- set true when we attempt a teleport so other loops stop
 
--- Normalize responses (helpers)
+-- Xeno/executor-friendly HTTP GET (tries many common functions)
 local function normalizeResponse(resp)
     if not resp then return nil end
     if type(resp) == "string" then return resp end
     if type(resp) == "table" then
-        -- many executors return a table with Body / body
         if resp.Body and type(resp.Body) == "string" then return resp.Body end
         if resp.body and type(resp.body) == "string" then return resp.body end
-        -- some return {Success=true, Body=...}
         for k,v in pairs(resp) do
-            if type(v) == "string" and #v > 0 then
-                return v
-            end
+            if type(v) == "string" and #v > 0 then return v end
         end
     end
     return nil
 end
 
--- Flexible HTTP GET that tries many common executor APIs (including Xeno variants).
 local function httpGet(url)
     local tries = {
-        -- synapse-style
         function() if syn and syn.request then return syn.request({Url = url, Method = "GET"}) end end,
-        -- generic request
         function() if request then return request({Url = url, Method = "GET"}) end end,
-        -- http.request
         function() if http and http.request then return http.request({Url = url, Method = "GET"}) end end,
-        -- some executors expose http_request
         function() if http_request then return http_request({Url = url, Method = "GET"}) end end,
-        -- some expose a http_get shortcut
         function() if http_get then return http_get(url) end end,
-        -- xeno-specific attempts (common patterns)
         function() if xeno and type(xeno) == "table" and xeno.request then return xeno.request({Url = url, Method = "GET"}) end end,
         function() if Xeno and type(Xeno) == "table" and Xeno.request then return Xeno.request({Url = url, Method = "GET"}) end end,
         function() if Xeno and type(Xeno) == "table" and Xeno.HttpGet then return Xeno.HttpGet(url) end end,
         function() if xeno and type(xeno) == "table" and xeno.HttpGet then return xeno.HttpGet(url) end end,
-        -- some wrappers store request under `.http` or `.http_request`
         function() if _G and _G.http_request then return _G.http_request({Url = url, Method = "GET"}) end end,
-        -- fallback to Roblox HttpService:GetAsync (may fail depending on environment/permissions)
         function() return HttpService:GetAsync(url) end
     }
 
@@ -120,25 +114,49 @@ local function httpGet(url)
         local ok, res = pcall(fn)
         if ok and res then
             local norm = normalizeResponse(res)
-            if norm then
-                return norm
-            end
+            if norm then return norm end
         end
     end
 
     error("No HTTP request method available in this execution environment.")
 end
 
--- Core: persistent server hop loop (will attempt teleport to ANY instance id found, ignoring "full"/restricted)
+-- Attempt teleport safely (sets teleporting flag so other loops stop)
+local function tryTeleportToServer(placeId, serverId)
+    if teleporting then return end
+    teleporting = true
+    enabled = false
+    -- Attempt teleport; wrap in pcall so the script doesn't error out
+    pcall(function()
+        TeleportSvc:TeleportToPlaceInstance(tonumber(placeId), serverId, LocalPlayer)
+    end)
+    -- If teleport succeeds the client will leave and script stops.
+    -- If teleport fails, TeleportInitFailed should fire (see below) and reset teleporting.
+end
+
+-- If teleport fails to initialize, reset so we can keep trying
+pcall(function()
+    if TeleportSvc and TeleportSvc.TeleportInitFailed then
+        TeleportSvc.TeleportInitFailed:Connect(function()
+            teleporting = false
+            enabled = true
+        end)
+    end
+end)
+
+-- Core persistent server hop loop: scan pages, attempt teleport to any serverId != current JobId
 local function serverHopLoop()
     local placeId = tostring(game.PlaceId)
     local myJobId = tostring(game.JobId)
     local baseUrl = "https://games.roblox.com/v1/games/" .. placeId .. "/servers/Public?sortOrder=Asc&limit=" .. tostring(SERVER_PAGE_LIMIT)
 
     while enabled do
+        if teleporting then break end
         local cursor = nil
+
         repeat
-            if not enabled then return end
+            if not enabled or teleporting then return end
+
             local url = baseUrl
             if cursor and #cursor > 0 then
                 url = url .. "&cursor=" .. HttpService:UrlEncode(cursor)
@@ -161,18 +179,16 @@ local function serverHopLoop()
             end
 
             for _, server in ipairs(data.data) do
-                if not enabled then return end
-                -- server.id is typical. Some endpoints have different keys; attempt several.
+                if not enabled or teleporting then return end
                 local serverId = tostring(server.id or server.playbackCloudId or server.idValue or "")
                 if serverId ~= "" and serverId ~= myJobId then
                     attemptCount = attemptCount + 1
                     attemptsLabel.Text = "Attempts: " .. tostring(attemptCount)
 
-                    -- attempt teleport and ignore errors (we deliberately keep trying)
-                    pcall(function()
-                        TeleportSvc:TeleportToPlaceInstance(tonumber(placeId), serverId, LocalPlayer)
-                    end)
+                    -- Try teleport (will set teleporting and stop other loops)
+                    tryTeleportToServer(placeId, serverId)
 
+                    -- tiny delay to avoid hammering too fast
                     wait(0.12)
                 end
             end
@@ -181,13 +197,13 @@ local function serverHopLoop()
             wait(0.05)
         until not cursor or not enabled
 
-        if enabled then
+        if enabled and not teleporting then
             wait(POLL_DELAY)
         end
     end
 end
 
--- Countdown + start
+-- Countdown routine (cancellable)
 local function startCountdownAndHop()
     local remaining = COUNTDOWN_TIME
     countdownLabel.Text = tostring(math.ceil(remaining)) .. "s"
@@ -203,7 +219,7 @@ local function startCountdownAndHop()
 
     countdownLabel.Text = "HOPPING..."
     local ok, err = pcall(serverHopLoop)
-    if not ok and enabled then
+    if not ok then
         countdownLabel.Text = "ERROR"
         warn("Server hop loop error:", err)
         wait(1)
@@ -211,7 +227,7 @@ local function startCountdownAndHop()
     end
 end
 
--- Toggle UI handler
+-- Toggle handler (still useful if you want to manually stop)
 toggleBtn.MouseButton1Click:Connect(function()
     enabled = not enabled
     if enabled then
@@ -219,7 +235,6 @@ toggleBtn.MouseButton1Click:Connect(function()
         toggleBtn.BackgroundColor3 = Color3.fromRGB(54,170,120)
         attemptCount = 0
         attemptsLabel.Text = "Attempts: 0"
-        countdownLabel.Text = tostring(COUNTDOWN_TIME) .. "s"
         spawn(startCountdownAndHop)
     else
         toggleBtn.Text = "OFF"
@@ -228,11 +243,7 @@ toggleBtn.MouseButton1Click:Connect(function()
     end
 end)
 
--- Auto-start on execute
-enabled = true
-toggleBtn.Text = "ON"
-toggleBtn.BackgroundColor3 = Color3.fromRGB(54,170,120)
-attemptCount = 0
-attemptsLabel.Text = "Attempts: 0"
+-- initial state: auto-start
 countdownLabel.Text = tostring(COUNTDOWN_TIME) .. "s"
+attemptsLabel.Text = "Attempts: 0"
 spawn(startCountdownAndHop)
